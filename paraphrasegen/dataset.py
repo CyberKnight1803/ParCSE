@@ -7,6 +7,8 @@ import pytorch_lightning as pl
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
+from paraphrasegen.constants import NUM_WORKERS, PATH_DATASETS, PATH_BASE_MODELS
+
 
 class CRLDataModule(pl.LightningDataModule):
     text_field_map = {
@@ -38,58 +40,87 @@ class CRLDataModule(pl.LightningDataModule):
     def __init__(
         self,
         model_name_or_path: str,
-        task_name: str = "paws",
-        max_seq_length: int = 128,
-        train_batch_size: int = 32,
-        eval_batch_size: int = 32,
+        task_name: str = "qqp",
+        max_seq_length: int = 32,
+        padding: str = "max_length",
+        batch_size: int = 32,
     ):
         super().__init__()
 
         self.model_name_or_path = model_name_or_path
         self.task_name = task_name
         self.max_seq_length = max_seq_length
-        self.train_batch_size = train_batch_size
-        self.eval_batch_size = eval_batch_size
+        self.padding = padding
+        self.batch_size = batch_size
 
         self.text_fields = self.text_field_map[task_name]
         self.dataset_args = self.dataset_args_map[task_name]
         self.tokenizer = AutoTokenizer.from_pretrained(
-            self.model_name_or_path, use_fast=True
+            self.model_name_or_path, use_fast=True, cache_dir=PATH_BASE_MODELS
         )
 
     def prepare_data(self) -> None:
-        load_dataset(*self.dataset_args)
+        load_dataset(*self.dataset_args, cache_dir=PATH_DATASETS)
 
     def setup(self, stage: Optional[str] = None) -> None:
-        self.dataset = load_dataset(*self.dataset_args)
+        self.dataset = load_dataset(*self.dataset_args, cache_dir=PATH_DATASETS)
+
+        if self.task_name == "qqp":
+            self.dataset["train"] = self.dataset["train"].filter(
+                lambda el: el["label"] == 1
+            )
+            self.dataset["validation"] = self.dataset["validation"].filter(
+                lambda el: el["label"] == 1
+            )
+
+        else:
+            self.dataset = self.dataset.filter(lambda el: el["label"] == 1)
         self.dataset = self.dataset.map(
-            self.convert_to_features, batched=True, remove_columns=["label"], num_proc=4
+            self.convert_to_features,
+            batched=True,
+            remove_columns=(["label",] + self.text_fields),
+            num_proc=NUM_WORKERS,
         )
 
         self.dataset.set_format(type="torch", columns=self.columns)
 
     def train_dataloader(self):
-        return DataLoader(self.dataset["train"], batch_size=self.train_batch_size)
+        return DataLoader(
+            self.dataset["train"],
+            batch_size=self.batch_size,
+            num_workers=NUM_WORKERS,
+            drop_last=True,
+        )
 
     def val_dataloader(self):
-        return DataLoader(self.dataset["validation"], batch_size=self.eval_batch_size)
+        return DataLoader(
+            self.dataset["validation"],
+            batch_size=self.batch_size,
+            num_workers=NUM_WORKERS,
+            drop_last=True,
+        )
 
     def test_dataloader(self):
-        return DataLoader(self.dataset["test"], batch_size=self.eval_batch_size)
+        return DataLoader(
+            self.dataset["test"],
+            batch_size=self.batch_size,
+            num_workers=NUM_WORKERS,
+            drop_last=True,
+        )
 
     def convert_to_features(self, example_batch, indices=None):
         features = {}
         tokenized_anchor = self.tokenizer(
             example_batch[self.text_fields[0]],
             max_length=self.max_seq_length,
-            padding="max_length",
+            padding=self.padding,
             truncation=True,
         )
 
         tokenized_target = self.tokenizer(
             example_batch[self.text_fields[1]],
             max_length=self.max_seq_length,
-            padding="max_length",
+            padding=self.padding,
             truncation=True,
         )
 
