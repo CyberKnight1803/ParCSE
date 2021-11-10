@@ -95,6 +95,17 @@ class Encoder(pl.LightningModule):
 
         self.loss_fn = ContrastiveLoss()
 
+    def setup(self, stage: Optional[str] = None) -> None:
+        if stage != "fit":
+            return
+
+        train_loader = self.train_dataloader()
+
+        # Required for the learning rate schedule
+        tb_size = self.hparams.train_batch_size * max(1, self.trainer.gpus)
+        ab_size = self.trainer.accumulate_grad_batches * float(self.trainer.max_epochs)
+        self.total_steps = (len(train_loader.dataset) // tb_size) // ab_size
+
     def forward(self, input_ids, attention_mask):
         sentence_mask = (
             (torch.rand(input_ids.size(), device=self.device) > self.input_mask_rate)
@@ -166,21 +177,33 @@ class Encoder(pl.LightningModule):
         )
 
         loss = self.loss_fn(anchor_outputs, target_outputs, batch["labels"])
+        self.log("train_loss", loss)
+
         return loss
 
+    def evaluate(self, batch, stage: str = None):
+        anchor_outputs = self(
+            input_ids=batch["anchor_input_ids"],
+            attention_mask=batch["anchor_attention_mask"],
+        )
+
+        target_outputs = self(
+            input_ids=batch["target_input_ids"],
+            attention_mask=batch["target_attention_mask"],
+        )
+
+        loss = self.loss_fn(anchor_outputs, target_outputs, batch["labels"])
+
+        if stage:
+            self.log(f"{stage}_loss", loss, prog_bar=True)
+        if stage == "test":
+            self.log("hp_metric", loss)
+
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
-        pass
+        self.evaluate(batch, "val")
 
-    def setup(self, stage: Optional[str] = None) -> None:
-        if stage != "fit":
-            return
-
-        train_loader = self.train_dataloader()
-
-        # Required for the learning rate schedule
-        tb_size = self.hparams.train_batch_size * max(1, self.trainer.gpus)
-        ab_size = self.trainer.accumulate_grad_batches * float(self.trainer.max_epochs)
-        self.total_steps = (len(train_loader.dataset) // tb_size) // ab_size
+    def test_step(self, batch, batch_idx):
+        self.evaluate(batch, "test")
 
     def configure_optimizers(self):
         """Prepare optimizer and schedule (linear warmup and decay)"""
