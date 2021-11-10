@@ -1,8 +1,8 @@
 from typing import Optional
-from pytorch_lightning import trainer
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer, seed_everything
@@ -12,12 +12,44 @@ from transformers import AutoConfig, AutoModel, AdamW, get_linear_schedule_with_
 from constants import AVAIL_GPUS, BATCH_SIZE, PATH_DATASETS
 
 
+class ContrastiveLoss(nn.Module):
+    """
+    Loss Function adapted from https://arxiv.org/abs/2104.08821
+    """
+
+    def __init__(self, temp: int = 1, eps=1e-20) -> None:
+        super(ContrastiveLoss, self).__init__()
+        self.temp = temp
+        self.eps = eps
+
+    def forward(
+        self, input: torch.Tensor, target: torch.Tensor, labels: torch.Tensor
+    ) -> torch.Tensor:
+        assert input.shape == target.shape
+        assert input.shape[0] == labels.shape[0]
+
+        input_normalized = F.normalize(input)
+        target_normalized = F.normalize(target)
+
+        # Efficient Compuation of x_i * x_j' for all i, j in batch_size
+        exp_sim_matrix = torch.exp(input_normalized @ target_normalized.T / self.temp)
+        exp_loss = (torch.diagonal(exp_sim_matrix) + self.eps) / torch.sum(
+            exp_sim_matrix, dim=1
+        )
+
+        loss = torch.log(exp_loss)
+        return -torch.mean(labels * loss - (1 - labels) * loss)
+
+
 class Encoder(pl.LightningModule):
     def __init__(
         self,
         model_name_or_path: str,
         input_mask_rate: float = 0.25,
+        embedding_from: str = "single",
+        last_n: str = 1,
         pooling: str = "mean",
+        use_conv: bool = False,
         learning_rate: float = 2e-5,
         adam_epsilon: float = 1e-8,
         warmup_steps: int = 0,
@@ -30,10 +62,38 @@ class Encoder(pl.LightningModule):
         self.save_hyperparameters()
         self.config = AutoConfig.from_pretrained(model_name_or_path)
         self.input_mask_rate = input_mask_rate
+        self.embedding_from = embedding_from
+        self.last_n = last_n
         self.pooling = pooling
+        self.use_conv = use_conv  # use a convolutional layer on the sentence embedding?
         self.bert_model = AutoModel.from_pretrained(
             model_name_or_path, config=self.config
         )
+
+        self.bert_embedding_size = (
+            self.last_n * 768 if self.embedding_from == "concat" else 768
+        )
+
+        if not self.use_conv:
+            layers = nn.Sequential(
+                nn.Linear(self.bert_embedding_size, 768),
+                nn.BatchNorm1d(768),
+                nn.Mish(),  # Try more!
+            )
+        else:
+            layers = nn.Sequential(
+                nn.Conv2d(1, 6, 64),
+                nn.MaxPool2d(2, 2),
+                nn.Conv2d(6, 16, 32),
+                nn.MaxPool2d(2, 2),
+                nn.Linear(42069, 768),  # Determine the magic number later
+                nn.BatchNorm1d(768),
+                nn.Mish(),  # Try more!
+            )
+
+        self.net = nn.Sequential(*layers)
+
+        self.loss_fn = ContrastiveLoss()
 
     def forward(self, input_ids, attention_mask):
         sentence_mask = (
@@ -42,30 +102,43 @@ class Encoder(pl.LightningModule):
             * (input_ids != 102)
         )
 
-        '''
+        """
         Check the effect of using 103 (mask token) vs using the 0 token. 
         No idea how the BERT Model would react to it. 
         Use both with certain percentage amounts? say 80:20
-        '''
+        """
         input_ids[sentence_mask] = 103  # 103 = The mask token
         # input_ids[sentence_mask] = 0
 
-
-        '''
+        """
         Do we need the rest of the hidden states? idts but then again what do I know.
         head_mask seems interesting since we are masking some parts of the sentences, and _maybe_ we should not pay attention to it. 
         But again, no idea. Check and report.
-        '''
-        embeddings = self.bert_model(
+        """
+        bert_outputs = self.bert_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             # head_mask=sentence_mask,
-            # output_hidden_states=True,
-        ).last_hidden_state
+            output_hidden_states=True,
+        )
+
+        if self.embedding_from == "last":
+            embeddings = bert_outputs.last_hidden_state
+        elif self.embedding_from == "single":
+            embeddings = bert_outputs.hidden_states[-self.last_n]
+        elif self.embedding_from == "sum":
+            stacked = torch.stack(bert_outputs.hidden_states[-self.last_n :])
+            embeddings = torch.sum(stacked, dim=0)
+        elif self.embedding_from == "concat":
+            embeddings = torch.cat(bert_outputs.hidden_states[-self.last_n :], dim=2)
+        else:
+            raise NotImplementedError
 
         # Pool -- Max pooling, Mean Pooling, CLS Pooling, Dense network? -- Maybe a new Proposal? Based on Convolutional Netowrks?
 
-        if self.pooling == "max":
+        if self.pooling == "dense" or self.use_conv:
+            pooled = embeddings
+        elif self.pooling == "max":
             pooled = torch.max(
                 embeddings, dim=1
             ).values  # torch.max returns max values, and indices.
@@ -73,12 +146,12 @@ class Encoder(pl.LightningModule):
             pooled = torch.mean(embeddings, dim=1)
         elif self.pooling == "cls":
             pooled = embeddings[:, 0]
-        elif self.pooling == 'dense':
-            pass
         else:
             raise NotImplementedError
 
-        return pooled
+        out = self.net(pooled)
+
+        return out
 
     def training_step(self, batch, batch_idx):
 
@@ -92,10 +165,8 @@ class Encoder(pl.LightningModule):
             attention_mask=batch["target_attention_mask"],
         )
 
-        # fmt: off
-        import IPython; IPython.embed()
-        import sys; sys.exit();
-        # fmt: on
+        loss = self.loss_fn(anchor_outputs, target_outputs, batch["labels"])
+        return loss
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         pass
@@ -153,7 +224,7 @@ if __name__ == "__main__":
 
     from dataset import CRLDataModule
 
-    model_name = "roberta-base"
+    model_name = "distilbert-base-uncased"
 
     dm = CRLDataModule(
         model_name_or_path=model_name,
