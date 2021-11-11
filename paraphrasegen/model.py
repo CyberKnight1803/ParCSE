@@ -1,4 +1,5 @@
 from typing import Optional
+import time
 
 import torch
 import torch.nn as nn
@@ -6,10 +7,11 @@ import torch.nn.functional as F
 
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer, seed_everything
+from pytorch_lightning.profiler import PyTorchProfiler, AdvancedProfiler
 
 from transformers import AutoConfig, AutoModel, AdamW, get_linear_schedule_with_warmup
 
-from constants import AVAIL_GPUS, BATCH_SIZE, PATH_DATASETS
+from constants import AVAIL_GPUS, BATCH_SIZE, NUM_WORKERS, PATH_DATASETS
 
 
 class ContrastiveLoss(nn.Module):
@@ -70,30 +72,33 @@ class Encoder(pl.LightningModule):
             model_name_or_path, config=self.config
         )
 
-        self.bert_embedding_size = (
-            self.last_n * 768 if self.embedding_from == "concat" else 768
+        # self.bert_embedding_size = (
+        #     self.last_n * 768 if self.embedding_from == "concat" else 768
+        # )
+
+        # if not self.use_conv:
+        #     layers = (
+        #         nn.Linear(self.bert_embedding_size, 768, bias=False),
+        #         nn.BatchNorm1d(768),
+        #         nn.Mish(),  # Try more!
+        #     )
+        # else:
+        #     layers = (
+        #         nn.Conv2d(1, 6, 64),
+        #         nn.MaxPool2d(2, 2),
+        #         nn.Conv2d(6, 16, 32),
+        #         nn.MaxPool2d(2, 2),
+        #         nn.Linear(42069, 768),  # Determine the magic number later
+        #         nn.BatchNorm1d(768),
+        #         nn.Mish(),  # Try more!
+        #     )
+
+        # self.net = nn.Sequential(*layers)
+        # self.loss_fn = ContrastiveLoss()
+
+        self.net = nn.Sequential(
+            nn.Linear(768, 768, bias=False), nn.BatchNorm1d(768), nn.Mish(),
         )
-
-        if not self.use_conv:
-            layers = nn.Sequential(
-                nn.Linear(self.bert_embedding_size, 768),
-                nn.BatchNorm1d(768),
-                nn.Mish(),  # Try more!
-            )
-        else:
-            layers = nn.Sequential(
-                nn.Conv2d(1, 6, 64),
-                nn.MaxPool2d(2, 2),
-                nn.Conv2d(6, 16, 32),
-                nn.MaxPool2d(2, 2),
-                nn.Linear(42069, 768),  # Determine the magic number later
-                nn.BatchNorm1d(768),
-                nn.Mish(),  # Try more!
-            )
-
-        self.net = nn.Sequential(*layers)
-
-        self.loss_fn = ContrastiveLoss()
 
     def setup(self, stage: Optional[str] = None) -> None:
         if stage != "fit":
@@ -133,33 +138,35 @@ class Encoder(pl.LightningModule):
             output_hidden_states=True,
         )
 
-        if self.embedding_from == "last":
-            embeddings = bert_outputs.last_hidden_state
-        elif self.embedding_from == "single":
-            embeddings = bert_outputs.hidden_states[-self.last_n]
-        elif self.embedding_from == "sum":
-            stacked = torch.stack(bert_outputs.hidden_states[-self.last_n :])
-            embeddings = torch.sum(stacked, dim=0)
-        elif self.embedding_from == "concat":
-            embeddings = torch.cat(bert_outputs.hidden_states[-self.last_n :], dim=2)
-        else:
-            raise NotImplementedError
+        # if self.embedding_from == "last":
+        #     embeddings = bert_outputs.last_hidden_state
+        # elif self.embedding_from == "single":
+        #     embeddings = bert_outputs.hidden_states[-self.last_n]
+        # elif self.embedding_from == "sum":
+        #     stacked = torch.stack(bert_outputs.hidden_states[-self.last_n :])
+        #     embeddings = torch.sum(stacked, dim=0)
+        # elif self.embedding_from == "concat":
+        #     embeddings = torch.cat(bert_outputs.hidden_states[-self.last_n :], dim=2)
+        # else:
+        #     raise NotImplementedError
 
-        # Pool -- Max pooling, Mean Pooling, CLS Pooling, Dense network? -- Maybe a new Proposal? Based on Convolutional Netowrks?
+        # # Pool -- Max pooling, Mean Pooling, CLS Pooling, Dense network? -- Maybe a new Proposal? Based on Convolutional Netowrks?
 
-        if self.pooling == "dense" or self.use_conv:
-            pooled = embeddings
-        elif self.pooling == "max":
-            pooled = torch.max(
-                embeddings, dim=1
-            ).values  # torch.max returns max values, and indices.
-        elif self.pooling == "mean":
-            pooled = torch.mean(embeddings, dim=1)
-        elif self.pooling == "cls":
-            pooled = embeddings[:, 0]
-        else:
-            raise NotImplementedError
+        # if self.pooling == "dense" or self.use_conv:
+        #     pooled = embeddings
+        # elif self.pooling == "max":
+        #     pooled = torch.max(
+        #         embeddings, dim=1
+        #     ).values  # torch.max returns max values, and indices.
+        # elif self.pooling == "mean":
+        #     pooled = torch.mean(embeddings, dim=1)
+        # elif self.pooling == "cls":
+        #     pooled = embeddings[:, 0]
+        # else:
+        #     raise NotImplementedError
 
+        embeddings = bert_outputs.last_hidden_state
+        pooled = torch.mean(embeddings, dim=1)
         out = self.net(pooled)
 
         return out
@@ -176,7 +183,13 @@ class Encoder(pl.LightningModule):
             attention_mask=batch["target_attention_mask"],
         )
 
-        loss = self.loss_fn(anchor_outputs, target_outputs, batch["labels"])
+        # loss = self.loss_fn(anchor_outputs, target_outputs, batch["labels"])
+        loss = torch.mean(
+            torch.mean(
+                F.mse_loss(anchor_outputs, target_outputs, reduction="none"), dim=1
+            )
+            * (2 * batch["labels"] - 1)
+        )
         self.log("train_loss", loss)
 
         return loss
@@ -192,7 +205,17 @@ class Encoder(pl.LightningModule):
             attention_mask=batch["target_attention_mask"],
         )
 
-        loss = self.loss_fn(anchor_outputs, target_outputs, batch["labels"])
+        # fmt: off
+        import IPython; IPython.embed()
+        import sys; sys.exit(0)
+        # fmt: on
+
+        loss = torch.mean(
+            torch.mean(
+                F.mse_loss(anchor_outputs, target_outputs, reduction="none"), dim=1
+            )
+            * (2 * batch["labels"] - 1)
+        )
 
         if stage:
             self.log(f"{stage}_loss", loss, prog_bar=True)
@@ -200,10 +223,45 @@ class Encoder(pl.LightningModule):
             self.log("hp_metric", loss)
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
-        self.evaluate(batch, "val")
+        anchor_outputs = self(
+            input_ids=batch["anchor_input_ids"],
+            attention_mask=batch["anchor_attention_mask"],
+        )
+
+        target_outputs = self(
+            input_ids=batch["target_input_ids"],
+            attention_mask=batch["target_attention_mask"],
+        )
+
+        loss = torch.mean(
+            torch.mean(
+                F.mse_loss(anchor_outputs, target_outputs, reduction="none"), dim=1
+            )
+            * (2 * batch["labels"] - 1)
+        )
+
+        self.log(f"val_loss", loss, prog_bar=True)
 
     def test_step(self, batch, batch_idx):
-        self.evaluate(batch, "test")
+        anchor_outputs = self(
+            input_ids=batch["anchor_input_ids"],
+            attention_mask=batch["anchor_attention_mask"],
+        )
+
+        target_outputs = self(
+            input_ids=batch["target_input_ids"],
+            attention_mask=batch["target_attention_mask"],
+        )
+
+        loss = torch.mean(
+            torch.mean(
+                F.mse_loss(anchor_outputs, target_outputs, reduction="none"), dim=1
+            )
+            * (2 * batch["labels"] - 1)
+        )
+
+        self.log(f"test_loss", loss, prog_bar=True)
+        self.log("hp_metric", loss)
 
     def configure_optimizers(self):
         """Prepare optimizer and schedule (linear warmup and decay)"""
@@ -247,12 +305,13 @@ if __name__ == "__main__":
 
     from dataset import CRLDataModule
 
-    model_name = "distilbert-base-uncased"
+    model_name = "distilroberta-base"
 
     dm = CRLDataModule(
         model_name_or_path=model_name,
         train_batch_size=BATCH_SIZE,
         eval_batch_size=BATCH_SIZE,
+        num_workers=NUM_WORKERS,
     )
     dm.prepare_data()
     dm.setup("fit")
@@ -263,5 +322,11 @@ if __name__ == "__main__":
         eval_batch_size=BATCH_SIZE,
     )
 
-    trainer = Trainer(max_epochs=1, gpus=AVAIL_GPUS)
+    profiler = PyTorchProfiler(
+        dirpath="profiles", filename=f"pytorch-{int(time.time())}"
+    )
+    # profiler = AdvancedProfiler(
+    #     dirpath="profiles", filename=f"advanced-{int(time.time())}"
+    # )
+    trainer = Trainer(max_epochs=1, gpus=AVAIL_GPUS, profiler=profiler)
     trainer.fit(encoder, dm)
