@@ -40,16 +40,14 @@ class CRLDataModule(pl.LightningDataModule):
         model_name_or_path: str,
         task_name: str = "paws",
         max_seq_length: int = 128,
-        train_batch_size: int = 32,
-        eval_batch_size: int = 32,
+        batch_size: int = 32,
     ):
         super().__init__()
 
         self.model_name_or_path = model_name_or_path
         self.task_name = task_name
         self.max_seq_length = max_seq_length
-        self.train_batch_size = train_batch_size
-        self.eval_batch_size = eval_batch_size
+        self.batch_size = batch_size
 
         self.text_fields = self.text_field_map[task_name]
         self.dataset_args = self.dataset_args_map[task_name]
@@ -69,13 +67,13 @@ class CRLDataModule(pl.LightningDataModule):
         self.dataset.set_format(type="torch", columns=self.columns)
 
     def train_dataloader(self):
-        return DataLoader(self.dataset["train"], batch_size=self.train_batch_size)
+        return DataLoader(self.dataset["train"], batch_size=self.batch_size)
 
     def val_dataloader(self):
-        return DataLoader(self.dataset["validation"], batch_size=self.eval_batch_size)
+        return DataLoader(self.dataset["validation"], batch_size=self.batch_size)
 
     def test_dataloader(self):
-        return DataLoader(self.dataset["test"], batch_size=self.eval_batch_size)
+        return DataLoader(self.dataset["test"], batch_size=self.batch_size)
 
     def convert_to_features(self, example_batch, indices=None):
         features = {}
