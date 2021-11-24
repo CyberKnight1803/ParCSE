@@ -40,8 +40,7 @@ class CRLDataModule(pl.LightningDataModule):
         model_name_or_path: str,
         task_name: str = "paws",
         max_seq_length: int = 128,
-        train_batch_size: int = 32,
-        eval_batch_size: int = 32,
+        batch_size: int = 32,
         num_workers: int = 1,
     ):
         super().__init__()
@@ -49,8 +48,7 @@ class CRLDataModule(pl.LightningDataModule):
         self.model_name_or_path = model_name_or_path
         self.task_name = task_name
         self.max_seq_length = max_seq_length
-        self.train_batch_size = train_batch_size
-        self.eval_batch_size = eval_batch_size
+        self.batch_size = batch_size
         self.num_workers = num_workers
 
         self.text_fields = self.text_field_map[task_name]
@@ -73,22 +71,25 @@ class CRLDataModule(pl.LightningDataModule):
     def train_dataloader(self):
         return DataLoader(
             self.dataset["train"],
-            batch_size=self.train_batch_size,
+            batch_size=self.batch_size,
             num_workers=self.num_workers,
+            drop_last=True,
         )
 
     def val_dataloader(self):
         return DataLoader(
             self.dataset["validation"],
-            batch_size=self.eval_batch_size,
+            batch_size=self.batch_size,
             num_workers=self.num_workers,
+            drop_last=True,
         )
 
     def test_dataloader(self):
         return DataLoader(
             self.dataset["test"],
-            batch_size=self.eval_batch_size,
+            batch_size=self.batch_size,
             num_workers=self.num_workers,
+            drop_last=True,
         )
 
     def convert_to_features(self, example_batch, indices=None):

@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer, seed_everything
+from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.profiler import PyTorchProfiler, AdvancedProfiler
 
 from transformers import AutoConfig, AutoModel, AdamW, get_linear_schedule_with_warmup
@@ -52,12 +53,11 @@ class Encoder(pl.LightningModule):
         last_n: str = 1,
         pooling: str = "mean",
         use_conv: bool = False,
-        learning_rate: float = 2e-5,
+        learning_rate: float = 3e-4,
         adam_epsilon: float = 1e-8,
         warmup_steps: int = 0,
-        weight_decay: float = 0.0,
-        train_batch_size: int = 32,
-        eval_batch_size: int = 32,
+        weight_decay: float = 1e-3,
+        batch_size: int = 32,
     ) -> None:
         super().__init__()
 
@@ -72,33 +72,29 @@ class Encoder(pl.LightningModule):
             model_name_or_path, config=self.config
         )
 
-        # self.bert_embedding_size = (
-        #     self.last_n * 768 if self.embedding_from == "concat" else 768
-        # )
-
-        # if not self.use_conv:
-        #     layers = (
-        #         nn.Linear(self.bert_embedding_size, 768, bias=False),
-        #         nn.BatchNorm1d(768),
-        #         nn.Mish(),  # Try more!
-        #     )
-        # else:
-        #     layers = (
-        #         nn.Conv2d(1, 6, 64),
-        #         nn.MaxPool2d(2, 2),
-        #         nn.Conv2d(6, 16, 32),
-        #         nn.MaxPool2d(2, 2),
-        #         nn.Linear(42069, 768),  # Determine the magic number later
-        #         nn.BatchNorm1d(768),
-        #         nn.Mish(),  # Try more!
-        #     )
-
-        # self.net = nn.Sequential(*layers)
-        # self.loss_fn = ContrastiveLoss()
-
-        self.net = nn.Sequential(
-            nn.Linear(768, 768, bias=False), nn.BatchNorm1d(768), nn.Mish(),
+        self.bert_embedding_size = (
+            self.last_n * 768 if self.embedding_from == "concat" else 768
         )
+
+        if not self.use_conv:
+            layers = (
+                nn.Linear(self.bert_embedding_size, 768, bias=False),
+                nn.BatchNorm1d(768),
+                nn.Mish(),  # Try more!
+            )
+        else:
+            layers = (
+                nn.Conv2d(1, 6, 64),
+                nn.MaxPool2d(2, 2),
+                nn.Conv2d(6, 16, 32),
+                nn.MaxPool2d(2, 2),
+                nn.Linear(42069, 768),  # Determine the magic number later
+                nn.BatchNorm1d(768),
+                nn.Mish(),  # Try more!
+            )
+
+        self.net = nn.Sequential(*layers)
+        self.loss_fn = ContrastiveLoss()
 
     def setup(self, stage: Optional[str] = None) -> None:
         if stage != "fit":
@@ -107,7 +103,7 @@ class Encoder(pl.LightningModule):
         train_loader = self.train_dataloader()
 
         # Required for the learning rate schedule
-        tb_size = self.hparams.train_batch_size * max(1, self.trainer.gpus)
+        tb_size = self.hparams.batch_size * max(1, self.trainer.gpus)
         ab_size = self.trainer.accumulate_grad_batches * float(self.trainer.max_epochs)
         self.total_steps = (len(train_loader.dataset) // tb_size) // ab_size
 
@@ -138,36 +134,34 @@ class Encoder(pl.LightningModule):
             output_hidden_states=True,
         )
 
-        # if self.embedding_from == "last":
-        #     embeddings = bert_outputs.last_hidden_state
-        # elif self.embedding_from == "single":
-        #     embeddings = bert_outputs.hidden_states[-self.last_n]
-        # elif self.embedding_from == "sum":
-        #     stacked = torch.stack(bert_outputs.hidden_states[-self.last_n :])
-        #     embeddings = torch.sum(stacked, dim=0)
-        # elif self.embedding_from == "concat":
-        #     embeddings = torch.cat(bert_outputs.hidden_states[-self.last_n :], dim=2)
-        # else:
-        #     raise NotImplementedError
+        if self.embedding_from == "last":
+            embeddings = bert_outputs.last_hidden_state
+        elif self.embedding_from == "single":
+            embeddings = bert_outputs.hidden_states[-self.last_n]
+        elif self.embedding_from == "sum":
+            stacked = torch.stack(bert_outputs.hidden_states[-self.last_n :])
+            embeddings = torch.sum(stacked, dim=0)
+        elif self.embedding_from == "concat":
+            embeddings = torch.cat(bert_outputs.hidden_states[-self.last_n :], dim=2)
+        else:
+            raise NotImplementedError
 
-        # # Pool -- Max pooling, Mean Pooling, CLS Pooling, Dense network? -- Maybe a new Proposal? Based on Convolutional Netowrks?
+        # Pool -- Max pooling, Mean Pooling, CLS Pooling, Dense network? -- Maybe a new Proposal? Based on Convolutional Netowrks?
 
-        # if self.pooling == "dense" or self.use_conv:
-        #     pooled = embeddings
-        # elif self.pooling == "max":
-        #     pooled = torch.max(
-        #         embeddings, dim=1
-        #     ).values  # torch.max returns max values, and indices.
-        # elif self.pooling == "mean":
-        #     pooled = torch.mean(embeddings, dim=1)
-        # elif self.pooling == "cls":
-        #     pooled = embeddings[:, 0]
-        # else:
-        #     raise NotImplementedError
+        if self.pooling == "dense" or self.use_conv:
+            pooled = embeddings
+        elif self.pooling == "max":
+            pooled = torch.max(
+                embeddings, dim=1
+            ).values  # torch.max returns max values, and indices.
+        elif self.pooling == "mean":
+            pooled = torch.mean(embeddings, dim=1)
+        elif self.pooling == "cls":
+            pooled = embeddings[:, 0]
+        else:
+            raise NotImplementedError
 
-        embeddings = bert_outputs.last_hidden_state
-        pooled = torch.mean(embeddings, dim=1)
-        out = self.net(pooled)
+        out = pooled # self.net(pooled)
 
         return out
 
@@ -204,11 +198,6 @@ class Encoder(pl.LightningModule):
             input_ids=batch["target_input_ids"],
             attention_mask=batch["target_attention_mask"],
         )
-
-        # fmt: off
-        import IPython; IPython.embed()
-        import sys; sys.exit(0)
-        # fmt: on
 
         loss = torch.mean(
             torch.mean(
@@ -308,25 +297,19 @@ if __name__ == "__main__":
     model_name = "distilroberta-base"
 
     dm = CRLDataModule(
-        model_name_or_path=model_name,
-        train_batch_size=BATCH_SIZE,
-        eval_batch_size=BATCH_SIZE,
-        num_workers=NUM_WORKERS,
+        model_name_or_path=model_name, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS,
     )
     dm.prepare_data()
-    dm.setup("fit")
-    encoder = Encoder(
-        model_name,
-        pooling="mean",
-        train_batch_size=BATCH_SIZE,
-        eval_batch_size=BATCH_SIZE,
+    encoder = Encoder(model_name, pooling="mean", batch_size=BATCH_SIZE,)
+
+    trainer = Trainer(
+        max_epochs=1,
+        gpus=AVAIL_GPUS,
+        log_every_n_steps=10,
+        precision=16,
+        accumulate_grad_batches=2048 // BATCH_SIZE,
+        stochastic_weight_avg=True,
+        logger=TensorBoardLogger("runs/"),
     )
 
-    profiler = PyTorchProfiler(
-        dirpath="profiles", filename=f"pytorch-{int(time.time())}"
-    )
-    # profiler = AdvancedProfiler(
-    #     dirpath="profiles", filename=f"advanced-{int(time.time())}"
-    # )
-    trainer = Trainer(max_epochs=1, gpus=AVAIL_GPUS, profiler=profiler)
     trainer.fit(encoder, dm)
