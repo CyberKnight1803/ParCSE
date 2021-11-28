@@ -218,10 +218,16 @@ if __name__ == "__main__":
 
     model_name = "roberta-base"
 
-    dm = CRLDataModule(model_name_or_path=model_name, batch_size=BATCH_SIZE,)
-    encoder = Encoder(model_name)
+    dm = CRLDataModule(
+        model_name_or_path=model_name,
+        batch_size=BATCH_SIZE,
+        max_seq_length=32,
+        # padding="do_not_pad",
+    )
+    # dm.prepare_data()
+    dm.setup("fit")
 
-    dm.prepare_data()
+    encoder = Encoder(model_name)
 
     trainer = Trainer(
         max_epochs=1,

@@ -41,7 +41,8 @@ class CRLDataModule(pl.LightningDataModule):
         self,
         model_name_or_path: str,
         task_name: str = "qqp",
-        max_seq_length: int = 128,
+        max_seq_length: int = 32,
+        padding: str = "max_length",
         batch_size: int = 32,
     ):
         super().__init__()
@@ -49,6 +50,7 @@ class CRLDataModule(pl.LightningDataModule):
         self.model_name_or_path = model_name_or_path
         self.task_name = task_name
         self.max_seq_length = max_seq_length
+        self.padding = padding
         self.batch_size = batch_size
 
         self.text_fields = self.text_field_map[task_name]
@@ -62,6 +64,7 @@ class CRLDataModule(pl.LightningDataModule):
 
     def setup(self, stage: Optional[str] = None) -> None:
         self.dataset = load_dataset(*self.dataset_args, cache_dir=PATH_DATASETS)
+
         if self.task_name == "qqp":
             self.dataset["train"] = self.dataset["train"].filter(
                 lambda el: el["label"] == 1
@@ -75,7 +78,7 @@ class CRLDataModule(pl.LightningDataModule):
         self.dataset = self.dataset.map(
             self.convert_to_features,
             batched=True,
-            remove_columns=["label"],
+            remove_columns=(["label",] + self.text_fields),
             num_proc=NUM_WORKERS,
         )
 
@@ -110,14 +113,14 @@ class CRLDataModule(pl.LightningDataModule):
         tokenized_anchor = self.tokenizer(
             example_batch[self.text_fields[0]],
             max_length=self.max_seq_length,
-            padding="max_length",
+            padding=self.padding,
             truncation=True,
         )
 
         tokenized_target = self.tokenizer(
             example_batch[self.text_fields[1]],
             max_length=self.max_seq_length,
-            padding="max_length",
+            padding=self.padding,
             truncation=True,
         )
 
