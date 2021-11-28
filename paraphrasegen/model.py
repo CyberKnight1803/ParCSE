@@ -1,3 +1,4 @@
+from os import stat_result
 from typing import Optional
 import time
 
@@ -8,56 +9,76 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.profiler import PyTorchProfiler, AdvancedProfiler
 
-from transformers import AutoConfig, AutoModel, AdamW, get_linear_schedule_with_warmup
+from transformers import AutoConfig, AutoModel, AdamW
+from constants import (
+    AVAIL_GPUS,
+    BATCH_SIZE,
+    PATH_BASE_MODELS,
+)
+from loss import ContrastiveLoss
 
-from constants import AVAIL_GPUS, BATCH_SIZE, NUM_WORKERS, PATH_DATASETS
 
-
-class ContrastiveLoss(nn.Module):
+class Pooler(nn.Module):
     """
-    Loss Function adapted from https://arxiv.org/abs/2104.08821
+    Inspired from the SimCSE Paper
+    Parameter-free poolers to get the sentence embedding
+    'cls': [CLS] representation with BERT/RoBERTa's MLP pooler.
+    'cls_before_pooler': [CLS] representation without the original MLP pooler.
+    'avg': average of the last layers' hidden states at each token.
+    'avg_top2': average of the last two layers.
+    'avg_first_last': average of the first and the last layers.
     """
 
-    def __init__(self, temp: int = 1, eps=1e-20) -> None:
-        super(ContrastiveLoss, self).__init__()
-        self.temp = temp
-        self.eps = eps
+    def __init__(self, pooler_type: str = "cls"):
+        super(Pooler, self).__init__()
+        self.pooler_type = pooler_type
+        assert self.pooler_type in [
+            "cls",
+            "cls_before_pooler",
+            "avg",
+            "avg_top2",
+            "avg_first_last",
+        ], f"unrecognized_pooling_type: {self.pooler_type}"
 
-    def forward(
-        self, input: torch.Tensor, target: torch.Tensor, labels: torch.Tensor
-    ) -> torch.Tensor:
-        assert input.shape == target.shape
-        assert input.shape[0] == labels.shape[0]
+    def forward(self, attention_mask, outputs):
+        last_hidden = outputs.last_hidden_state
+        pooler_output = outputs.pooler_output
+        hidden_states = outputs.hidden_states
 
-        input_normalized = F.normalize(input)
-        target_normalized = F.normalize(target)
-
-        # Efficient Compuation of x_i * x_j' for all i, j in batch_size
-        exp_sim_matrix = torch.exp(input_normalized @ target_normalized.T / self.temp)
-        exp_loss = (torch.diagonal(exp_sim_matrix) + self.eps) / torch.sum(
-            exp_sim_matrix, dim=1
-        )
-
-        loss = torch.log(exp_loss)
-        return -torch.mean(labels * loss - (1 - labels) * loss)
+        if self.pooler_type in ["cls_before_pooler", "cls"]:
+            return last_hidden[:, 0]
+        elif self.pooler_type == "avg":
+            return (last_hidden * attention_mask.unsqueeze(-1)).sum(
+                1
+            ) / attention_mask.sum(-1).unsqueeze(-1)
+        elif self.pooler_type == "avg_first_last":
+            first_hidden = hidden_states[0]
+            last_hidden = hidden_states[-1]
+            pooled_result = (
+                (first_hidden + last_hidden) / 2.0 * attention_mask.unsqueeze(-1)
+            ).sum(1) / attention_mask.sum(-1).unsqueeze(-1)
+            return pooled_result
+        elif self.pooler_type == "avg_top2":
+            second_last_hidden = hidden_states[-2]
+            last_hidden = hidden_states[-1]
+            pooled_result = (
+                (last_hidden + second_last_hidden) / 2.0 * attention_mask.unsqueeze(-1)
+            ).sum(1) / attention_mask.sum(-1).unsqueeze(-1)
+            return pooled_result
+        else:
+            raise NotImplementedError
 
 
 class Encoder(pl.LightningModule):
     def __init__(
         self,
         model_name_or_path: str,
-        input_mask_rate: float = 0.25,
+        input_mask_rate: float = 0.1,
         embedding_from: str = "single",
-        last_n: str = 1,
-        pooling: str = "mean",
-        use_conv: bool = False,
-        learning_rate: float = 3e-4,
-        adam_epsilon: float = 1e-8,
-        warmup_steps: int = 0,
-        weight_decay: float = 1e-3,
-        batch_size: int = 32,
+        pooler_type: str = "cls",
+        learning_rate: float = 3e-5,
+        weight_decay: float = 0,
     ) -> None:
         super().__init__()
 
@@ -65,47 +86,18 @@ class Encoder(pl.LightningModule):
         self.config = AutoConfig.from_pretrained(model_name_or_path)
         self.input_mask_rate = input_mask_rate
         self.embedding_from = embedding_from
-        self.last_n = last_n
-        self.pooling = pooling
-        self.use_conv = use_conv  # use a convolutional layer on the sentence embedding?
         self.bert_model = AutoModel.from_pretrained(
-            model_name_or_path, config=self.config
+            model_name_or_path, config=self.config, cache_dir=PATH_BASE_MODELS
         )
 
-        self.bert_embedding_size = (
-            self.last_n * 768 if self.embedding_from == "concat" else 768
+        self.pooler_type = pooler_type
+        self.pooler = Pooler(pooler_type)
+
+        self.net = nn.Sequential(
+            nn.Linear(768, 768, bias=False), nn.BatchNorm1d(768), nn.Tanh(),
         )
 
-        if not self.use_conv:
-            layers = (
-                nn.Linear(self.bert_embedding_size, 768, bias=False),
-                nn.BatchNorm1d(768),
-                nn.Mish(),  # Try more!
-            )
-        else:
-            layers = (
-                nn.Conv2d(1, 6, 64),
-                nn.MaxPool2d(2, 2),
-                nn.Conv2d(6, 16, 32),
-                nn.MaxPool2d(2, 2),
-                nn.Linear(42069, 768),  # Determine the magic number later
-                nn.BatchNorm1d(768),
-                nn.Mish(),  # Try more!
-            )
-
-        self.net = nn.Sequential(*layers)
         self.loss_fn = ContrastiveLoss()
-
-    def setup(self, stage: Optional[str] = None) -> None:
-        if stage != "fit":
-            return
-
-        train_loader = self.train_dataloader()
-
-        # Required for the learning rate schedule
-        tb_size = self.hparams.batch_size * max(1, self.trainer.gpus)
-        ab_size = self.trainer.accumulate_grad_batches * float(self.trainer.max_epochs)
-        self.total_steps = (len(train_loader.dataset) // tb_size) // ab_size
 
     def forward(self, input_ids, attention_mask):
         sentence_mask = (
@@ -134,39 +126,18 @@ class Encoder(pl.LightningModule):
             output_hidden_states=True,
         )
 
-        if self.embedding_from == "last":
-            embeddings = bert_outputs.last_hidden_state
-        elif self.embedding_from == "single":
-            embeddings = bert_outputs.hidden_states[-self.last_n]
-        elif self.embedding_from == "sum":
-            stacked = torch.stack(bert_outputs.hidden_states[-self.last_n :])
-            embeddings = torch.sum(stacked, dim=0)
-        elif self.embedding_from == "concat":
-            embeddings = torch.cat(bert_outputs.hidden_states[-self.last_n :], dim=2)
-        else:
-            raise NotImplementedError
+        pooler_output = self.pooler(attention_mask, bert_outputs)
 
-        # Pool -- Max pooling, Mean Pooling, CLS Pooling, Dense network? -- Maybe a new Proposal? Based on Convolutional Netowrks?
+        # If using "cls", we add an extra MLP layer
+        # (same as BERT's original implementation) over the representation.
+        if self.pooler_type == "cls":
+            pooler_output = self.net(pooler_output)
 
-        if self.pooling == "dense" or self.use_conv:
-            pooled = embeddings
-        elif self.pooling == "max":
-            pooled = torch.max(
-                embeddings, dim=1
-            ).values  # torch.max returns max values, and indices.
-        elif self.pooling == "mean":
-            pooled = torch.mean(embeddings, dim=1)
-        elif self.pooling == "cls":
-            pooled = embeddings[:, 0]
-        else:
-            raise NotImplementedError
-
-        out = pooled # self.net(pooled)
-
-        return out
+        return pooler_output
 
     def training_step(self, batch, batch_idx):
 
+        # Get Batch of Embeddings: [batch_size, hidden]
         anchor_outputs = self(
             input_ids=batch["anchor_input_ids"],
             attention_mask=batch["anchor_attention_mask"],
@@ -177,39 +148,10 @@ class Encoder(pl.LightningModule):
             attention_mask=batch["target_attention_mask"],
         )
 
-        # loss = self.loss_fn(anchor_outputs, target_outputs, batch["labels"])
-        loss = torch.mean(
-            torch.mean(
-                F.mse_loss(anchor_outputs, target_outputs, reduction="none"), dim=1
-            )
-            * (2 * batch["labels"] - 1)
-        )
+        loss = self.loss_fn(anchor_outputs, target_outputs)
         self.log("train_loss", loss)
 
         return loss
-
-    def evaluate(self, batch, stage: str = None):
-        anchor_outputs = self(
-            input_ids=batch["anchor_input_ids"],
-            attention_mask=batch["anchor_attention_mask"],
-        )
-
-        target_outputs = self(
-            input_ids=batch["target_input_ids"],
-            attention_mask=batch["target_attention_mask"],
-        )
-
-        loss = torch.mean(
-            torch.mean(
-                F.mse_loss(anchor_outputs, target_outputs, reduction="none"), dim=1
-            )
-            * (2 * batch["labels"] - 1)
-        )
-
-        if stage:
-            self.log(f"{stage}_loss", loss, prog_bar=True)
-        if stage == "test":
-            self.log("hp_metric", loss)
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         anchor_outputs = self(
@@ -222,12 +164,7 @@ class Encoder(pl.LightningModule):
             attention_mask=batch["target_attention_mask"],
         )
 
-        loss = torch.mean(
-            torch.mean(
-                F.mse_loss(anchor_outputs, target_outputs, reduction="none"), dim=1
-            )
-            * (2 * batch["labels"] - 1)
-        )
+        loss = self.loss_fn(anchor_outputs, target_outputs)
 
         self.log(f"val_loss", loss, prog_bar=True)
 
@@ -242,12 +179,7 @@ class Encoder(pl.LightningModule):
             attention_mask=batch["target_attention_mask"],
         )
 
-        loss = torch.mean(
-            torch.mean(
-                F.mse_loss(anchor_outputs, target_outputs, reduction="none"), dim=1
-            )
-            * (2 * batch["labels"] - 1)
-        )
+        loss = self.loss_fn(anchor_outputs, target_outputs)
 
         self.log(f"test_loss", loss, prog_bar=True)
         self.log("hp_metric", loss)
@@ -255,7 +187,7 @@ class Encoder(pl.LightningModule):
     def configure_optimizers(self):
         """Prepare optimizer and schedule (linear warmup and decay)"""
 
-        no_decay = ["bias", "LayerNorm.weight"]  # Remove?
+        no_decay = ["bias", "LayerNorm.weight"]
         optimizer_grouped_parameters = [
             {
                 "params": [
@@ -274,19 +206,9 @@ class Encoder(pl.LightningModule):
                 "weight_decay": 0.0,
             },
         ]
-        optimizer = AdamW(
-            optimizer_grouped_parameters,
-            lr=self.hparams.learning_rate,
-            eps=self.hparams.adam_epsilon,
-        )
+        optimizer = AdamW(optimizer_grouped_parameters, lr=self.hparams.learning_rate,)
 
-        scheduler = get_linear_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=self.hparams.warmup_steps,
-            num_training_steps=self.total_steps,
-        )
-        scheduler = {"scheduler": scheduler, "interval": "step", "frequency": 1}
-        return [optimizer], [scheduler]
+        return optimizer
 
 
 if __name__ == "__main__":
@@ -294,20 +216,18 @@ if __name__ == "__main__":
 
     from dataset import CRLDataModule
 
-    model_name = "distilroberta-base"
+    model_name = "roberta-base"
 
-    dm = CRLDataModule(
-        model_name_or_path=model_name, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS,
-    )
+    dm = CRLDataModule(model_name_or_path=model_name, batch_size=BATCH_SIZE,)
+    encoder = Encoder(model_name)
+
     dm.prepare_data()
-    encoder = Encoder(model_name, pooling="mean", batch_size=BATCH_SIZE,)
 
     trainer = Trainer(
         max_epochs=1,
         gpus=AVAIL_GPUS,
         log_every_n_steps=10,
         precision=16,
-        accumulate_grad_batches=2048 // BATCH_SIZE,
         stochastic_weight_avg=True,
         logger=TensorBoardLogger("runs/"),
     )
