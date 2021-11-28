@@ -7,6 +7,8 @@ import pytorch_lightning as pl
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
+from constants import NUM_WORKERS, PATH_DATASETS, PATH_BASE_MODELS
+
 
 class CRLDataModule(pl.LightningDataModule):
     text_field_map = {
@@ -38,10 +40,9 @@ class CRLDataModule(pl.LightningDataModule):
     def __init__(
         self,
         model_name_or_path: str,
-        task_name: str = "paws",
+        task_name: str = "qqp",
         max_seq_length: int = 128,
         batch_size: int = 32,
-        num_workers: int = 1,
     ):
         super().__init__()
 
@@ -49,21 +50,33 @@ class CRLDataModule(pl.LightningDataModule):
         self.task_name = task_name
         self.max_seq_length = max_seq_length
         self.batch_size = batch_size
-        self.num_workers = num_workers
 
         self.text_fields = self.text_field_map[task_name]
         self.dataset_args = self.dataset_args_map[task_name]
         self.tokenizer = AutoTokenizer.from_pretrained(
-            self.model_name_or_path, use_fast=True
+            self.model_name_or_path, use_fast=True, cache_dir=PATH_BASE_MODELS
         )
 
     def prepare_data(self) -> None:
-        load_dataset(*self.dataset_args)
+        load_dataset(*self.dataset_args, cache_dir=PATH_DATASETS)
 
     def setup(self, stage: Optional[str] = None) -> None:
-        self.dataset = load_dataset(*self.dataset_args)
+        self.dataset = load_dataset(*self.dataset_args, cache_dir=PATH_DATASETS)
+        if self.task_name == "qqp":
+            self.dataset["train"] = self.dataset["train"].filter(
+                lambda el: el["label"] == 1
+            )
+            self.dataset["validation"] = self.dataset["validation"].filter(
+                lambda el: el["label"] == 1
+            )
+
+        else:
+            self.dataset = self.dataset.filter(lambda el: el["label"] == 1)
         self.dataset = self.dataset.map(
-            self.convert_to_features, batched=True, remove_columns=["label"], num_proc=4
+            self.convert_to_features,
+            batched=True,
+            remove_columns=["label"],
+            num_proc=NUM_WORKERS,
         )
 
         self.dataset.set_format(type="torch", columns=self.columns)
@@ -72,7 +85,7 @@ class CRLDataModule(pl.LightningDataModule):
         return DataLoader(
             self.dataset["train"],
             batch_size=self.batch_size,
-            num_workers=self.num_workers,
+            num_workers=NUM_WORKERS,
             drop_last=True,
         )
 
@@ -80,7 +93,7 @@ class CRLDataModule(pl.LightningDataModule):
         return DataLoader(
             self.dataset["validation"],
             batch_size=self.batch_size,
-            num_workers=self.num_workers,
+            num_workers=NUM_WORKERS,
             drop_last=True,
         )
 
@@ -88,7 +101,7 @@ class CRLDataModule(pl.LightningDataModule):
         return DataLoader(
             self.dataset["test"],
             batch_size=self.batch_size,
-            num_workers=self.num_workers,
+            num_workers=NUM_WORKERS,
             drop_last=True,
         )
 
