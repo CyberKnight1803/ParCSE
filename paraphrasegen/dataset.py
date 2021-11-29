@@ -7,7 +7,7 @@ import pytorch_lightning as pl
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
-from constants import NUM_WORKERS, PATH_DATASETS, PATH_BASE_MODELS
+from paraphrasegen.constants import NUM_WORKERS, PATH_DATASETS, PATH_BASE_MODELS
 
 
 class CRLDataModule(pl.LightningDataModule):

@@ -11,12 +11,13 @@ from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.loggers import TensorBoardLogger
 
 from transformers import AutoConfig, AutoModel, AdamW
-from constants import (
+
+from paraphrasegen.loss import ContrastiveLoss
+from paraphrasegen.constants import (
     AVAIL_GPUS,
     BATCH_SIZE,
     PATH_BASE_MODELS,
 )
-from loss import ContrastiveLoss
 
 
 class Pooler(nn.Module):
@@ -70,6 +71,19 @@ class Pooler(nn.Module):
             raise NotImplementedError
 
 
+class MLPLayer(nn.Module):
+    def __init__(self, in_dims: int = 768, hidden_dims: int = 768):
+        super(MLPLayer, self).__init__()
+        self.fc1 = nn.Linear(in_dims, hidden_dims)
+        self.layer_norm = nn.LayerNorm(hidden_dims)
+        self.activation = nn.Tanh()
+
+    def forward(self, x: torch.Tensor):
+        out = self.fc1(x)
+        out = self.layer_norm(out)
+        return self.activation(out)
+
+
 class Encoder(pl.LightningModule):
     def __init__(
         self,
@@ -93,26 +107,31 @@ class Encoder(pl.LightningModule):
         self.pooler_type = pooler_type
         self.pooler = Pooler(pooler_type)
 
-        self.net = nn.Sequential(
-            nn.Linear(768, 768, bias=False), nn.BatchNorm1d(768), nn.Tanh(),
-        )
+        self.net = MLPLayer()
 
         self.loss_fn = ContrastiveLoss()
 
-    def forward(self, input_ids, attention_mask):
-        sentence_mask = (
-            (torch.rand(input_ids.size(), device=self.device) > self.input_mask_rate)
-            * (input_ids != 101)
-            * (input_ids != 102)
-        )
+    def forward(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor, do_mlm: bool = True
+    ):
 
-        """
-        Check the effect of using 103 (mask token) vs using the 0 token. 
-        No idea how the BERT Model would react to it. 
-        Use both with certain percentage amounts? say 80:20
-        """
-        input_ids[sentence_mask] = 103  # 103 = The mask token
-        # input_ids[sentence_mask] = 0
+        if do_mlm:
+            sentence_mask = (
+                (
+                    torch.rand(input_ids.size(), device=self.device)
+                    > self.input_mask_rate
+                )
+                * (input_ids != 101)
+                * (input_ids != 102)
+            )
+
+            """
+            Check the effect of using 103 (mask token) vs using the 0 token. 
+            No idea how the BERT Model would react to it. 
+            Use both with certain percentage amounts? say 80:20
+            """
+            # input_ids[sentence_mask] = 103  # 103 = The mask token
+            input_ids[sentence_mask] = 0
 
         """
         Do we need the rest of the hidden states? idts but then again what do I know.
@@ -149,7 +168,7 @@ class Encoder(pl.LightningModule):
         )
 
         loss = self.loss_fn(anchor_outputs, target_outputs)
-        self.log("train_loss", loss)
+        self.log("loss/train", loss)
 
         return loss
 
@@ -166,7 +185,8 @@ class Encoder(pl.LightningModule):
 
         loss = self.loss_fn(anchor_outputs, target_outputs)
 
-        self.log(f"val_loss", loss, prog_bar=True)
+        self.log("loss/val", loss, prog_bar=True)
+        self.log("hp_metric", loss)
 
     def test_step(self, batch, batch_idx):
         anchor_outputs = self(
@@ -181,7 +201,7 @@ class Encoder(pl.LightningModule):
 
         loss = self.loss_fn(anchor_outputs, target_outputs)
 
-        self.log(f"test_loss", loss, prog_bar=True)
+        self.log("loss/test", loss, prog_bar=True)
         self.log("hp_metric", loss)
 
     def configure_optimizers(self):
@@ -206,7 +226,11 @@ class Encoder(pl.LightningModule):
                 "weight_decay": 0.0,
             },
         ]
-        optimizer = AdamW(optimizer_grouped_parameters, lr=self.hparams.learning_rate,)
+
+        optimizer = AdamW(
+            optimizer_grouped_parameters,
+            lr=self.hparams.learning_rate,
+        )
 
         return optimizer
 
@@ -227,7 +251,7 @@ if __name__ == "__main__":
     # dm.prepare_data()
     dm.setup("fit")
 
-    encoder = Encoder(model_name)
+    encoder = Encoder(model_name, pooler_type="avg_top2")
 
     trainer = Trainer(
         max_epochs=1,
