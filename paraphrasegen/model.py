@@ -89,7 +89,6 @@ class Encoder(pl.LightningModule):
         self,
         model_name_or_path: str,
         input_mask_rate: float = 0.1,
-        embedding_from: str = "single",
         pooler_type: str = "cls",
         learning_rate: float = 3e-5,
         weight_decay: float = 0,
@@ -99,7 +98,6 @@ class Encoder(pl.LightningModule):
         self.save_hyperparameters()
         self.config = AutoConfig.from_pretrained(model_name_or_path)
         self.input_mask_rate = input_mask_rate
-        self.embedding_from = embedding_from
         self.bert_model = AutoModel.from_pretrained(
             model_name_or_path, config=self.config, cache_dir=PATH_BASE_MODELS
         )
@@ -149,8 +147,8 @@ class Encoder(pl.LightningModule):
 
         # If using "cls", we add an extra MLP layer
         # (same as BERT's original implementation) over the representation.
-        if self.pooler_type == "cls":
-            pooler_output = self.net(pooler_output)
+        # if self.pooler_type == "cls":
+        pooler_output = self.net(pooler_output)
 
         return pooler_output
 
@@ -256,7 +254,7 @@ if __name__ == "__main__":
     trainer = Trainer(
         max_epochs=1,
         gpus=AVAIL_GPUS,
-        log_every_n_steps=10,
+        log_every_n_steps=2,
         precision=16,
         stochastic_weight_avg=True,
         logger=TensorBoardLogger("runs/"),
