@@ -234,18 +234,90 @@ class Encoder(pl.LightningModule):
 
         return optimizer
 
-
-class Decoder(pl.LightningModule):
+class Seq2Seq(pl.LightningModule):
     def __init__(
-        self, 
-        pooler_output, 
-        embedding_from, 
-        
+        self,
+        encoder: nn.Module,
+        decoder_hidden_size:int = 768,                 # Decoder Hyperparams
+        decoder_num_heads:int = 6,
+        decoder_num_layers=6
 
     ) -> None:
         super().__init__() 
-        pass 
 
+        self.encoder = encoder 
+        self.decoder_hidden_size = decoder_hidden_size
+        self.decoder_num_heads = decoder_num_heads
+        self.decoder_num_layers = decoder_num_layers
+
+        decoder_layer = nn.TransformerDecoderLayer(d_model=self.hidden_size, nhead=self.decoder_num_heads)
+        self.decoder = nn.TransformerDecoder(decoder_layer, decoder_num_layers=self.decoder_num_layers)
+
+        self.loss_fn = nn.CrossEntropyLoss()
+
+    def forward(self, target_outs, encoder_outs):                                           # Check if written correctly
+        decoder_outs = self.decoder(target_outs, encoder_outs)
+        return decoder_outs 
+
+    def training_step(self, batch, batch_idx):
+        # Get Batch of Embeddings: [batch_size, hidden]
+        anchor_outputs = self.encoder(
+            input_ids=batch["anchor_input_ids"],
+            attention_mask=batch["anchor_attention_mask"],
+        )
+
+        target_outputs = self.encoder(
+            input_ids=batch["target_input_ids"],
+            attention_mask=batch["target_attention_mask"],
+        )
+
+        decoder_outs = self(target_outputs, anchor_outputs)
+        
+        loss = self.loss_fn(batch['anchor_input_ids'], decoder_outs)
+
+        self.log("loss/train", loss, prog_bar=True)
+        self.log("hp_metric", loss)
+    
+    def validation_step(self, batch, batch_idx):
+        # Get Batch of Embeddings: [batch_size, hidden]
+        anchor_outputs = self.encoder(
+            input_ids=batch["anchor_input_ids"],
+            attention_mask=batch["anchor_attention_mask"],
+        )
+
+        target_outputs = self.encoder(
+            input_ids=batch["target_input_ids"],
+            attention_mask=batch["target_attention_mask"],
+        )
+
+        decoder_outs = self(target_outputs, anchor_outputs)
+        
+        loss = self.loss_fn(batch['anchor_input_ids'], decoder_outs)
+
+        self.log("loss/val", loss, prog_bar=True)
+        self.log("hp_metric", loss)
+
+    def test_step(self, batch, batch_idx):
+        # Get Batch of Embeddings: [batch_size, hidden]
+        anchor_outputs = self.encoder(
+            input_ids=batch["anchor_input_ids"],
+            attention_mask=batch["anchor_attention_mask"],
+        )
+
+        target_outputs = self.encoder(
+            input_ids=batch["target_input_ids"],
+            attention_mask=batch["target_attention_mask"],
+        )
+
+        decoder_outs = self(target_outputs, anchor_outputs)
+        
+        loss = self.loss_fn(batch['anchor_input_ids'], decoder_outs)
+
+        self.log("loss/test", loss, prog_bar=True)
+        self.log("hp_metric", loss)
+
+
+    # Configure optimizer ?????
 
 
 if __name__ == "__main__":
