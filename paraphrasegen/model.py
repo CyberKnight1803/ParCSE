@@ -235,6 +235,19 @@ class Encoder(pl.LightningModule):
         return optimizer
 
 
+class Decoder(pl.LightningModule):
+    def __init__(
+        self, 
+        pooler_output, 
+        embedding_from, 
+        
+
+    ) -> None:
+        super().__init__() 
+        pass 
+
+
+
 if __name__ == "__main__":
     seed_everything(42)
 
