@@ -1,5 +1,5 @@
 from os import stat_result
-from typing import Optional
+from typing import List, Optional
 import time
 
 import torch
@@ -72,16 +72,37 @@ class Pooler(nn.Module):
 
 
 class MLPLayer(nn.Module):
-    def __init__(self, in_dims: int = 768, hidden_dims: int = 768):
+    def __init__(
+        self, in_dims: int = 768, hidden_dims: List[int] = 768, activation: str = "GELU"
+    ):
         super(MLPLayer, self).__init__()
-        self.fc1 = nn.Linear(in_dims, hidden_dims)
-        self.layer_norm = nn.LayerNorm(hidden_dims)
-        self.activation = nn.Tanh()
+
+        if activation == "GELU":
+            activation_fn = nn.GELU()
+        elif activation == "ReLU":
+            activation_fn = nn.ReLU()
+        elif activation == "mish":
+            activation_fn = nn.Mish()
+        elif activation == "leaky_relu":
+            activation_fn = nn.LeakyReLU()
+
+        layers = [
+            nn.Linear(in_dims, hidden_dims[0]),
+            nn.LayerNorm(hidden_dims[0]),
+            activation_fn,
+        ]
+
+        for i in range(1, len(hidden_dims)):
+            layers += [
+                nn.Linear(hidden_dims[i - 1], hidden_dims[i]),
+                nn.LayerNorm(hidden_dims[i]),
+                activation_fn,
+            ]
+
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor):
-        out = self.fc1(x)
-        out = self.layer_norm(out)
-        return self.activation(out)
+        return self.net(x)
 
 
 class Encoder(pl.LightningModule):
@@ -90,6 +111,7 @@ class Encoder(pl.LightningModule):
         model_name_or_path: str,
         input_mask_rate: float = 0.1,
         pooler_type: str = "cls",
+        mlp_layers: List[int] = [768],
         learning_rate: float = 3e-5,
         weight_decay: float = 0,
     ) -> None:
@@ -98,6 +120,7 @@ class Encoder(pl.LightningModule):
         self.save_hyperparameters()
         self.config = AutoConfig.from_pretrained(model_name_or_path)
         self.input_mask_rate = input_mask_rate
+        
         self.bert_model = AutoModel.from_pretrained(
             model_name_or_path, config=self.config, cache_dir=PATH_BASE_MODELS
         )
@@ -105,7 +128,7 @@ class Encoder(pl.LightningModule):
         self.pooler_type = pooler_type
         self.pooler = Pooler(pooler_type)
 
-        self.net = MLPLayer()
+        self.net = MLPLayer(in_dims=768, hidden_dims=mlp_layers)
 
         self.loss_fn = ContrastiveLoss()
 
@@ -147,8 +170,8 @@ class Encoder(pl.LightningModule):
 
         # If using "cls", we add an extra MLP layer
         # (same as BERT's original implementation) over the representation.
-        # if self.pooler_type == "cls":
-        pooler_output = self.net(pooler_output)
+        if self.pooler_type == "cls":
+            pooler_output = self.net(pooler_output)
 
         return pooler_output
 
@@ -165,7 +188,14 @@ class Encoder(pl.LightningModule):
             attention_mask=batch["target_attention_mask"],
         )
 
-        loss = self.loss_fn(anchor_outputs, target_outputs)
+        negative_index = torch.randperm(batch["anchor_input_ids"].size(0))
+
+        negative_outputs = self(
+            input_ids=batch["anchor_input_ids"][negative_index],
+            attention_mask=batch["anchor_attention_mask"][negative_index],
+        )
+
+        loss = self.loss_fn(anchor_outputs, target_outputs, negative_outputs)
         self.log("loss/train", loss)
 
         return loss
@@ -174,30 +204,50 @@ class Encoder(pl.LightningModule):
         anchor_outputs = self(
             input_ids=batch["anchor_input_ids"],
             attention_mask=batch["anchor_attention_mask"],
+            do_mlm=False,
         )
 
         target_outputs = self(
             input_ids=batch["target_input_ids"],
             attention_mask=batch["target_attention_mask"],
+            do_mlm=False,
         )
 
-        loss = self.loss_fn(anchor_outputs, target_outputs)
+        negative_index = torch.randperm(batch["anchor_input_ids"].size(0))
+
+        negative_outputs = self(
+            input_ids=batch["anchor_input_ids"][negative_index],
+            attention_mask=batch["anchor_attention_mask"][negative_index],
+            do_mlm=False
+        )
+
+        loss = self.loss_fn(anchor_outputs, target_outputs, negative_outputs)
 
         self.log("loss/val", loss, prog_bar=True)
         self.log("hp_metric", loss)
 
-    def test_step(self, batch, batch_idx):
+    def test_step(self, batch, batch_idx):       
         anchor_outputs = self(
             input_ids=batch["anchor_input_ids"],
             attention_mask=batch["anchor_attention_mask"],
+            do_mlm=False,
         )
 
         target_outputs = self(
             input_ids=batch["target_input_ids"],
             attention_mask=batch["target_attention_mask"],
+            do_mlm=False,
         )
 
-        loss = self.loss_fn(anchor_outputs, target_outputs)
+        negative_index = torch.randperm(batch["anchor_input_ids"].size(0))
+
+        negative_outputs = self(
+            input_ids=batch["anchor_input_ids"][negative_index],
+            attention_mask=batch["anchor_attention_mask"][negative_index],
+            do_mlm=False
+        )
+
+        loss = self.loss_fn(anchor_outputs, target_outputs, negative_outputs)
 
         self.log("loss/test", loss, prog_bar=True)
         self.log("hp_metric", loss)
