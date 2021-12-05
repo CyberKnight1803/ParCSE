@@ -29,19 +29,21 @@ class Checker(pl.LightningModule):
         pooler_type: str = "cls",
         learning_rate: float = 3e-4,
         weight_decay: float = 0,
-        in_dims: int = 768
+        # in_dims: int = 768
     ) -> None:
         super().__init__()
 
         self.save_hyperparameters(ignore="encoder")
-        self.encoder = encoder 
+        self.encoder = encoder
+        self.encoder.freeze()
+
         self.net = nn.Sequential(
-            nn.Linear(in_dims, 1),
-            nn.Sigmoid()
+            nn.Linear(1, 1),
         )
 
         self.sim = nn.CosineSimilarity()
         self.loss_fn = nn.BCEWithLogitsLoss()
+        # self.loss_fn = nn.BCELoss()
 
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor):
         outs = self.encoder(input_ids, attention_mask)
@@ -50,19 +52,22 @@ class Checker(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         # Get Batch of Embeddings: [batch_size, hidden]
         
-        labels = batch['labels']
+        labels = batch['labels'].unsqueeze(1)
 
         anchor_outs= self(
             input_ids=batch["anchor_input_ids"],
             attention_mask=batch["anchor_attention_mask"],
         )
-
         target_outs= self(
                 input_ids=batch["target_input_ids"],
                 attention_mask=batch["target_attention_mask"],
         )
 
-        outs = self.sim(target_outs, anchor_outs)
+        outs = self.sim(target_outs, anchor_outs).unsqueeze(1)
+
+        # print(f"outs : {outs.shape}")
+        # import sys 
+        # sys.exit()
         outs = self.net(outs)
 
         loss = self.loss_fn(labels.float(), outs.float())
@@ -139,7 +144,10 @@ if __name__=="__main__":
     # dm.prepare_data()
     dm.setup("fit")
 
-    encoder = Encoder(model_name, pooler_type="avg_top2")
+    # encoder = Encoder(model_name, pooler_type="avg_top2")
+    path_to_checkpoint = "model_name_or_path-roberta-base_task-paws_batch_size-128_dims-[768]_epochs-5_input_mask_rate-0.27797015931263_pooler_type-avg_learning_rate-3e-05_weight_decay-0.0.ckpt"  # input(">>> Enter Model Checkpoint Path: ")
+    print("Loading Model... ", sep="")
+    encoder = Encoder.load_from_checkpoint(path_to_checkpoint)
     checker = Checker(encoder)
 
     trainer = Trainer(
