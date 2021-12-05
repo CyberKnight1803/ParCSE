@@ -127,3 +127,9 @@ venv.bak/
 # seed project
 lightning_logs/
 .DS_Store
+
+
+# WandB stuff
+ParaPhrasegen/
+wandb/
+*.ckpt

@@ -23,25 +23,37 @@ def serialize_params(**kwargs):
     return "_".join(pairs)
 
 
-def train(model_name, task, batch_size, dims, epochs, input_mask_rate, pooler, lr, wd):
+def train(
+    model_name_or_path,
+    task,
+    batch_size,
+    dims,
+    epochs,
+    input_mask_rate,
+    pooler_type,
+    temp,
+    hard_negative_weight,
+    learning_rate,
+    weight_decay,
+):
     seed_everything(42)
 
     run_name = serialize_params(
-        model_name=model_name,
+        model_name_or_path=model_name_or_path,
         task=task,
         batch_size=batch_size,
         dims=dims,
         epochs=epochs,
         input_mask_rate=input_mask_rate,
-        pooler=pooler,
-        lr=lr,
-        wd=wd,
+        pooler_type=pooler_type,
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
     )
 
     print(f"Staring run: {run_name}")
 
     dm = CRLDataModule(
-        model_name_or_path=model_name,
+        model_name_or_path=model_name_or_path,
         task_name=task,
         batch_size=batch_size,
         max_seq_length=32,
@@ -51,18 +63,20 @@ def train(model_name, task, batch_size, dims, epochs, input_mask_rate, pooler, l
     dm.setup("fit")
 
     encoder = Encoder(
-        model_name,
+        model_name_or_path,
         input_mask_rate=input_mask_rate,
         mlp_layers=dims,
-        pooler_type=pooler,
-        learning_rate=lr,
-        weight_decay=wd,
+        pooler_type=pooler_type,
+        temp=temp,
+        hard_negative_weight=hard_negative_weight,
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
     )
 
     eval(encoder)
 
     swa = StochasticWeightAveraging()
-    checkpoint_cb = ModelCheckpoint(monitor="loss/val", mode="min", save_last=True)
+    checkpoint_cb = ModelCheckpoint(monitor="hp_metric", mode="max", save_last=True)
 
     trainer = Trainer(
         max_epochs=epochs,
@@ -70,9 +84,7 @@ def train(model_name, task, batch_size, dims, epochs, input_mask_rate, pooler, l
         log_every_n_steps=2,
         precision=16,
         # logger=TensorBoardLogger("runs/var_mlp_dims"),
-        logger=WandbLogger(
-            project="ParaPhraseGen", save_dir="wandb_runs/", name=run_name
-        ),
+        logger=WandbLogger(project="ParaPhraseGen", name=run_name),
         callbacks=[swa, checkpoint_cb],
     )
 
@@ -90,25 +102,29 @@ if __name__ == "__main__":
         description="Train an Encoder Model using Contrastive Leanring"
     )
 
-    parser.add_argument("--model", "-m", default="roberta-base")
-    parser.add_argument("--task", "-t", default="paws")
-    parser.add_argument("--batch_size", "-b", default=BATCH_SIZE, type=int)
-    parser.add_argument("--epochs", "-e", default=MAX_EPOCHS, type=int)
-    parser.add_argument("--dims", "-d", default=[768], nargs="*", type=int)
-    parser.add_argument("--input_mask_rate", "-i", default=0.05, type=float)
-    parser.add_argument("--pooler", "-p", default="cls")
-    parser.add_argument("--lr", "-l", default=3e-5, type=float)
-    parser.add_argument("--wd", "-w", default=0.0, type=float)
+    parser.add_argument("--model_name_or_path", default="roberta-base")
+    parser.add_argument("--task", default="paws")
+    parser.add_argument("--batch_size", default=BATCH_SIZE, type=int)
+    parser.add_argument("--epochs", default=MAX_EPOCHS, type=int)
+    parser.add_argument("--dims", default=[768], nargs="*", type=int)
+    parser.add_argument("--input_mask_rate", default=0.05, type=float)
+    parser.add_argument("--pooler_type", default="cls")
+    parser.add_argument("--temp", default=0.05, type=float)
+    parser.add_argument("--hard_negative_weight", default=0, type=float)
+    parser.add_argument("--learning_rate", default=3e-5, type=float)
+    parser.add_argument("--weight_decay", default=0.0, type=float)
     args = parser.parse_args()
 
     train(
-        model_name=args.model,
+        model_name_or_path=args.model_name_or_path,
         task=args.task,
         batch_size=args.batch_size,
         dims=args.dims,
         epochs=args.epochs,
         input_mask_rate=args.input_mask_rate,
-        pooler=args.pooler,
-        lr=args.lr,
-        wd=args.wd,
+        pooler_type=args.pooler_type,
+        temp=args.temp,
+        hard_negative_weight=args.hard_negative_weight,
+        learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay,
     )

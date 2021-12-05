@@ -12,7 +12,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 from transformers import AutoConfig, AutoModel, AdamW
 
-from paraphrasegen.loss import ContrastiveLoss
+from paraphrasegen.loss import ContrastiveLoss, Similarity
 from paraphrasegen.constants import (
     AVAIL_GPUS,
     BATCH_SIZE,
@@ -112,6 +112,8 @@ class Encoder(pl.LightningModule):
         input_mask_rate: float = 0.1,
         pooler_type: str = "cls",
         mlp_layers: List[int] = [768],
+        temp: float = 0.05,
+        hard_negative_weight: float = 0,
         learning_rate: float = 3e-5,
         weight_decay: float = 0,
     ) -> None:
@@ -120,7 +122,7 @@ class Encoder(pl.LightningModule):
         self.save_hyperparameters()
         self.config = AutoConfig.from_pretrained(model_name_or_path)
         self.input_mask_rate = input_mask_rate
-        
+
         self.bert_model = AutoModel.from_pretrained(
             model_name_or_path, config=self.config, cache_dir=PATH_BASE_MODELS
         )
@@ -130,7 +132,10 @@ class Encoder(pl.LightningModule):
 
         self.net = MLPLayer(in_dims=768, hidden_dims=mlp_layers)
 
-        self.loss_fn = ContrastiveLoss()
+        self.loss_fn = ContrastiveLoss(
+            temp=self.hparams.temp,
+            hard_negative_weight=self.hparams.hard_negative_weight,
+        )
 
     def forward(
         self, input_ids: torch.Tensor, attention_mask: torch.Tensor, do_mlm: bool = True
@@ -200,57 +205,47 @@ class Encoder(pl.LightningModule):
 
         return loss
 
+    def _evaluate(self, batch):
+        anchor_outputs = self(
+            input_ids=batch["anchor_input_ids"],
+            attention_mask=batch["anchor_attention_mask"],
+            do_mlm=False,
+        )
+
+        target_outputs = self(
+            input_ids=batch["target_input_ids"],
+            attention_mask=batch["target_attention_mask"],
+            do_mlm=False,
+        )
+
+        pos_anchor_emb = anchor_outputs[batch["labels"] == 1]
+        pos_target_emb = target_outputs[batch["labels"] == 1]
+
+        neg_anchor_emb = anchor_outputs[batch["labels"] == 0]
+        neg_target_emb = target_outputs[batch["labels"] == 0]
+
+        pos_diff = torch.norm(pos_anchor_emb - pos_target_emb).mean()
+        neg_diff = torch.norm(neg_anchor_emb - neg_target_emb).mean()
+
+        sim = Similarity(temp=self.hparams.temp)
+        pos_sim = sim(pos_anchor_emb, pos_target_emb).mean()
+        neg_sim = sim(neg_anchor_emb, neg_target_emb).mean()
+
+        self.log_dict(
+            {
+                "diff/pos": pos_diff,
+                "diff/neg": neg_diff,
+                "sim/pos": pos_sim,
+                "sim/neg": neg_sim,
+            }
+        )
+        self.log("hp_metric", pos_sim - neg_sim)
+
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
-        anchor_outputs = self(
-            input_ids=batch["anchor_input_ids"],
-            attention_mask=batch["anchor_attention_mask"],
-            do_mlm=False,
-        )
+        self._evaluate(batch)
 
-        target_outputs = self(
-            input_ids=batch["target_input_ids"],
-            attention_mask=batch["target_attention_mask"],
-            do_mlm=False,
-        )
-
-        negative_index = torch.randperm(batch["anchor_input_ids"].size(0))
-
-        negative_outputs = self(
-            input_ids=batch["anchor_input_ids"][negative_index],
-            attention_mask=batch["anchor_attention_mask"][negative_index],
-            do_mlm=False
-        )
-
-        loss = self.loss_fn(anchor_outputs, target_outputs, negative_outputs)
-
-        self.log("loss/val", loss, prog_bar=True)
-        self.log("hp_metric", loss)
-
-    def test_step(self, batch, batch_idx):       
-        anchor_outputs = self(
-            input_ids=batch["anchor_input_ids"],
-            attention_mask=batch["anchor_attention_mask"],
-            do_mlm=False,
-        )
-
-        target_outputs = self(
-            input_ids=batch["target_input_ids"],
-            attention_mask=batch["target_attention_mask"],
-            do_mlm=False,
-        )
-
-        negative_index = torch.randperm(batch["anchor_input_ids"].size(0))
-
-        negative_outputs = self(
-            input_ids=batch["anchor_input_ids"][negative_index],
-            attention_mask=batch["anchor_attention_mask"][negative_index],
-            do_mlm=False
-        )
-
-        loss = self.loss_fn(anchor_outputs, target_outputs, negative_outputs)
-
-        self.log("loss/test", loss, prog_bar=True)
-        self.log("hp_metric", loss)
+    def test_step(self, batch, batch_idx):
+        self._evaluate(batch)
 
     def configure_optimizers(self):
         """Prepare optimizer and schedule (linear warmup and decay)"""
