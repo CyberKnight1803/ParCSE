@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import pytorch_lightning as p
+import pytorch_lightning as pl
 
 
 class Similarity(nn.Module):
@@ -60,3 +60,26 @@ class ContrastiveLoss(nn.Module):
         loss = F.cross_entropy(cos_sim, labels)
 
         return loss
+
+
+class AlignmentLoss(nn.Module):
+    def __init__(self, alpha: int = 2):
+        super(AlignmentLoss, self).__init__()
+        self.alpha = alpha
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor):
+        return torch.mean(
+            torch.norm(x - y, p=2, dim=1).pow(self.alpha)
+        )
+
+
+class UniformityLoss(nn.Module):
+    def __init__(self):
+        super(UniformityLoss, self).__init__()
+
+    def forward(self, x: torch.Tensor):
+        return torch.log(
+            torch.mean(
+                torch.exp(-2 * torch.pdist(x, p=2).pow(2))
+                )
+            )

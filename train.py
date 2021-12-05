@@ -93,7 +93,7 @@ def train(
     # trainer.
     eval(encoder)
 
-    trainer.save_checkpoint(f"{run_name}.ckpt")
+    # trainer.save_checkpoint(f"checkpoints/{run_name}.ckpt")
 
 
 if __name__ == "__main__":
@@ -107,7 +107,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", default=BATCH_SIZE, type=int)
     parser.add_argument("--epochs", default=MAX_EPOCHS, type=int)
     parser.add_argument("--dims", default=[768], nargs="*", type=int)
-    parser.add_argument("--input_mask_rate", default=0.05, type=float)
+    parser.add_argument("--input_mask_rate", default=0.2, type=float)
     parser.add_argument("--pooler_type", default="cls")
     parser.add_argument("--temp", default=0.05, type=float)
     parser.add_argument("--hard_negative_weight", default=0, type=float)

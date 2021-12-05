@@ -12,7 +12,12 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 from transformers import AutoConfig, AutoModel, AdamW
 
-from paraphrasegen.loss import ContrastiveLoss, Similarity
+from paraphrasegen.loss import (
+    Similarity,
+    ContrastiveLoss,
+    AlignmentLoss,
+    UniformityLoss,
+)
 from paraphrasegen.constants import (
     AVAIL_GPUS,
     BATCH_SIZE,
@@ -223,19 +228,23 @@ class Encoder(pl.LightningModule):
         neg_anchor_emb = anchor_outputs[batch["labels"] == 0]
         neg_target_emb = target_outputs[batch["labels"] == 0]
 
-        pos_diff = torch.norm(pos_anchor_emb - pos_target_emb).mean()
-        neg_diff = torch.norm(neg_anchor_emb - neg_target_emb).mean()
-
         sim = Similarity(temp=self.hparams.temp)
         pos_sim = sim(pos_anchor_emb, pos_target_emb).mean()
         neg_sim = sim(neg_anchor_emb, neg_target_emb).mean()
 
+        align_loss = AlignmentLoss()
+        pos_alignment = align_loss(pos_anchor_emb, pos_target_emb)
+        neg_alignment = align_loss(neg_anchor_emb, neg_target_emb)
+
+        uniformity_loss = UniformityLoss()
+        uniformity = uniformity_loss(torch.cat([anchor_outputs, target_outputs], dim=0))
         self.log_dict(
             {
-                "diff/pos": pos_diff,
-                "diff/neg": neg_diff,
                 "sim/pos": pos_sim,
                 "sim/neg": neg_sim,
+                "alignment/pos": pos_alignment,
+                "alignment/neg": neg_alignment,
+                "uniformity": uniformity,
             }
         )
         self.log("hp_metric", pos_sim - neg_sim)
