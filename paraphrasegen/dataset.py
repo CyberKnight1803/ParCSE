@@ -65,20 +65,22 @@ class CRLDataModule(pl.LightningDataModule):
     def setup(self, stage: Optional[str] = None) -> None:
         self.dataset = load_dataset(*self.dataset_args, cache_dir=PATH_DATASETS)
 
-        if self.task_name == "qqp":
-            self.dataset["train"] = self.dataset["train"].filter(
-                lambda el: el["label"] == 1
-            )
-            self.dataset["validation"] = self.dataset["validation"].filter(
-                lambda el: el["label"] == 1
-            )
+        self.dataset["train"] = self.dataset["train"].filter(
+            lambda el: el["label"] == 1
+        )
+        # self.dataset["validation"] = self.dataset["validation"].filter(
+        #     lambda el: el["label"] == 1
+        # )
 
-        else:
-            self.dataset = self.dataset.filter(lambda el: el["label"] == 1)
         self.dataset = self.dataset.map(
             self.convert_to_features,
             batched=True,
-            remove_columns=(["label",] + self.text_fields),
+            remove_columns=(
+                [
+                    "label",
+                ]
+                + self.text_fields
+            ),
             num_proc=NUM_WORKERS,
         )
 
